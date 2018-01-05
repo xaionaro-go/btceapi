@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 )
 
 var ApiURL string = "https://wex.nz"
@@ -21,9 +23,26 @@ var ApiURL string = "https://wex.nz"
 type BtceAPI struct {
 	Key    string
 	Secret string
+	Debug  bool
+	nonce  int64
 }
 
-func (btcApi BtceAPI) GetInfo() (UserInfo, error) {
+var getNonceMutex = &sync.Mutex{}
+
+func (btcApi *BtceAPI) getNonce() int64 {
+	getNonceMutex.Lock()
+	defer getNonceMutex.Unlock()
+
+	curTS := time.Now().Unix()
+	if btcApi.nonce < curTS {
+		btcApi.nonce = curTS
+	} else {
+		btcApi.nonce++
+	}
+	return btcApi.nonce
+}
+
+func (btcApi *BtceAPI) GetInfo() (UserInfo, error) {
 	params := make(map[string]string)
 	params["method"] = "getInfo"
 
@@ -33,7 +52,7 @@ func (btcApi BtceAPI) GetInfo() (UserInfo, error) {
 	return res, err
 }
 
-func (btcApi BtceAPI) GetTransHistory(filterParams FilterParams) (TransHistory, error) {
+func (btcApi *BtceAPI) GetTransHistory(filterParams FilterParams) (TransHistory, error) {
 	params := getParams(filterParams)
 	res := TransHistory{}
 	err := query(btcApi, "TransHistory", params, &res)
@@ -41,7 +60,7 @@ func (btcApi BtceAPI) GetTransHistory(filterParams FilterParams) (TransHistory, 
 	return res, err
 }
 
-func (btcApi BtceAPI) GetTradeHistory(filterParams FilterParams) (TradeHistory, error) {
+func (btcApi *BtceAPI) GetTradeHistory(filterParams FilterParams) (TradeHistory, error) {
 	params := getParams(filterParams)
 	res := TradeHistory{}
 	err := query(btcApi, "TradeHistory", params, &res)
@@ -49,7 +68,7 @@ func (btcApi BtceAPI) GetTradeHistory(filterParams FilterParams) (TradeHistory, 
 	return res, err
 }
 
-func (btcApi BtceAPI) GetOrderList(filterParams FilterParams) (OrderList, error) {
+func (btcApi *BtceAPI) GetOrderList(filterParams FilterParams) (OrderList, error) {
 	params := getParams(filterParams)
 	res := OrderList{}
 	err := query(btcApi, "ActiveOrders", params, &res)
@@ -57,7 +76,7 @@ func (btcApi BtceAPI) GetOrderList(filterParams FilterParams) (OrderList, error)
 	return res, err
 }
 
-func (btcApi BtceAPI) CoinDepositAddress(coinName string) (CoinDepositAddressAnswer, error) {
+func (btcApi *BtceAPI) CoinDepositAddress(coinName string) (CoinDepositAddressAnswer, error) {
 	params := make(map[string]string)
 	params["coinName"] = coinName
 
@@ -67,7 +86,7 @@ func (btcApi BtceAPI) CoinDepositAddress(coinName string) (CoinDepositAddressAns
 	return res, err
 }
 
-func (btcApi BtceAPI) WithdrawCoin(coinName string, amount float64, address string) (WithdrawCoinAnswer, error) {
+func (btcApi *BtceAPI) WithdrawCoin(coinName string, amount float64, address string) (WithdrawCoinAnswer, error) {
 	params := make(map[string]string)
 	params["coinName"] = coinName
 	params["amount"] = strconv.FormatFloat(amount, 'f', -1, 64)
@@ -79,7 +98,7 @@ func (btcApi BtceAPI) WithdrawCoin(coinName string, amount float64, address stri
 	return res, err
 }
 
-func (btcApi BtceAPI) Trade(pair string, tradeType string, rate float64, amount float64) (TradeAnswer, error) {
+func (btcApi *BtceAPI) Trade(pair string, tradeType string, rate float64, amount float64) (TradeAnswer, error) {
 	params := make(map[string]string)
 
 	params["pair"] = pair
@@ -92,7 +111,7 @@ func (btcApi BtceAPI) Trade(pair string, tradeType string, rate float64, amount 
 	return res, err
 }
 
-func (btcApi BtceAPI) CancelOrder(orderId string) (CancelOrderAnswer, error) {
+func (btcApi *BtceAPI) CancelOrder(orderId string) (CancelOrderAnswer, error) {
 	params := make(map[string]string)
 
 	params["order_id"] = orderId
@@ -194,9 +213,9 @@ func orderName(orderAsc bool) string {
 	return "DESC"
 }
 
-func query(btcAPI BtceAPI, method string, params map[string]string, result interface{}) error {
+func query(btcAPI *BtceAPI, method string, params map[string]string, result interface{}) error {
 	params["method"] = method
-	params["nonce"] = strconv.FormatInt(time.Now().Unix(), 10)
+	params["nonce"] = fmt.Sprintf("%v", btcAPI.getNonce())
 	client := http.Client{Timeout: time.Duration(15 * time.Second)}
 
 	data := url.Values{}
@@ -222,6 +241,24 @@ func query(btcAPI BtceAPI, method string, params map[string]string, result inter
 
 	defer resp.Body.Close()
 
+	if btcAPI.Debug {
+		fmt.Println("Request:")
+
+		requestDump, err := httputil.DumpRequest(req, true)
+		if err != nil {
+			fmt.Println(err)
+		}
+		fmt.Println(string(requestDump))
+
+		fmt.Println("Response:")
+
+		responseDump, err := httputil.DumpResponse(resp, true)
+		if err != nil {
+			fmt.Println(err)
+		}
+		fmt.Println(string(responseDump))
+	}
+
 	bodyBytes, errBody := ioutil.ReadAll(resp.Body)
 	if errBody != nil {
 		return errBody
@@ -240,6 +277,17 @@ func query(btcAPI BtceAPI, method string, params map[string]string, result inter
 			return err
 		}
 	} else {
+		if strings.HasPrefix(respData.Error, "invalid nonce parameter") {
+			words := strings.Split(respData.Error, ":")
+			btcAPI.nonce, err = strconv.ParseInt(words[3], 10, 64)
+			if err != nil {
+				return err
+			}
+			if btcAPI.Debug {
+				fmt.Println("Fixed nonce to:", btcAPI.nonce)
+			}
+			return query(btcAPI, method, params, result)
+		}
 		return nil
 	}
 

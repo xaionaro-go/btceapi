@@ -14,7 +14,7 @@ If you like the library please donate some coins on follow addresses:
     key := "Key"
     secret := "Secret"
 
-    btceAPI := btceapi.BtceAPI{Key: key, Secret: secret}
+    btceAPI := btceapi.BtceAPI{Key: key, Secret: secret, Debug: true}
     res, err := btceAPI.GetInfo()
 
     if err == nil {

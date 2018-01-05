@@ -157,5 +157,6 @@ type TradeInfoV3 struct {
 
 type RawResponse struct {
 	Success int             `json:"success"`
+	Error   string          `json:"error"`
 	Return  json.RawMessage `json:"return"`
 }
